@@ -159,7 +159,7 @@ class MainActivity : AppCompatActivity() {
             val mode = if (switchOffline.isChecked) "FSCC STRICT" else "90DNS INTERNET"
             txtStatus.text = "ARRÊTÉ (Mode prêt : $mode)"
             txtStatus.setTextColor(Color.parseColor("#FF6B6B"))
-            btnToggle.text = if (switchOffline.isChecked) "Démarrer FSCC Strict" else "Démarrer 90DNS (KaiTube)"
+            btnToggle.text = if (switchOffline.isChecked) "Démarrer FSCC Strict" else "Démarrer 90DNS"
             spinnerIfaces.isEnabled = true
             switchAutoHotspot.isEnabled = true
             switchOffline.isEnabled = true

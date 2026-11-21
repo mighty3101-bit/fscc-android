@@ -70,7 +70,7 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:checked="true"
-        android:text="Mode FSCC strict (décocher pour 90DNS + Internet KaiTube)"
+        android:text="Mode FSCC strict (décocher pour mode 90DNS)"
         android:textColor="#EAEAEA"
         android:layout_marginBottom="12dp" />
 

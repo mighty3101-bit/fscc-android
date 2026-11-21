@@ -32,9 +32,12 @@ class FsccService : Service() {
     companion object {
         const val ACTION_START = "com.fscc.android.START"
         const val ACTION_STOP = "com.fscc.android.STOP"
+        const val ACTION_SET_MODE = "com.fscc.android.SET_MODE"
+        const val ACTION_CYCLE_MODE = "com.fscc.android.CYCLE_MODE"
         const val EXTRA_IFACE = "iface"
         const val EXTRA_IP = "ip"
         const val EXTRA_STRICT_OFFLINE = "strict_offline"
+        const val EXTRA_MODE = "mode"
         const val EXTRA_AUTO_HOTSPOT = "auto_hotspot"
         private const val DNS_PORT = 5354
         private const val HTTP_PORT = 8095
@@ -55,19 +58,24 @@ class FsccService : Service() {
             "nintendo.info", "nintendo.tv", "nintendo.lu", "nintendo-europe-sales.com",
             "nega-lp1-upload.s3.us-east-1.amazonaws.com",
             "scsi-upload-lp1.s3.us-west-2.amazonaws.com",
-            "google-analytics.com", "googletagmanager.com"
+            "google-analytics.com", "googletagmanager.com",
+            "dns.google", "dns.google.com", "cloudflare-dns.com",
+            "one.one.one.one", "mozilla.cloudflare-dns.com",
+            "dns.quad9.net", "doh.opendns.com",
+            "dns.adguard-dns.com", "dns.nextdns.io"
         )
     }
 
     private val running = AtomicBoolean(false)
     private val pool = Executors.newCachedThreadPool()
+    private val modeLock = Any()
     private var udpDnsSocket: DatagramSocket? = null
     private var tcpDnsServer: ServerSocket? = null
     private var httpServer: ServerSocket? = null
     private var wakeLock: PowerManager.WakeLock? = null
     private var currentIface: String = ""
     private var currentIp: String = ""
-    @Volatile private var currentStrict: Boolean = true
+    @Volatile private var currentMode: FsccMode = FsccMode.STRICT
     @Volatile private var manageHotspot: Boolean = false
     @Volatile private var hotspotStartedByUs: Boolean = false
 
@@ -79,16 +87,35 @@ class FsccService : Service() {
                 stopAll()
                 stopSelf()
             }
+            ACTION_SET_MODE -> {
+                if (running.get()) {
+                    val newMode = FsccMode.fromPref(intent.getStringExtra(EXTRA_MODE), true)
+                    pool.execute { switchModeLive(newMode) }
+                }
+            }
+            ACTION_CYCLE_MODE -> {
+                if (running.get()) {
+                    val nextMode = when (currentMode) {
+                        FsccMode.STRICT -> FsccMode.DNS90
+                        FsccMode.DNS90 -> FsccMode.WHITELIST
+                        FsccMode.WHITELIST -> FsccMode.STRICT
+                    }
+                    pool.execute { switchModeLive(nextMode) }
+                }
+            }
             ACTION_START -> {
+                loadListsFromPrefs()
                 val iface = intent.getStringExtra(EXTRA_IFACE).orEmpty()
                 val ip = intent.getStringExtra(EXTRA_IP).orEmpty()
-                val strict = intent.getBooleanExtra(EXTRA_STRICT_OFFLINE, true)
+                val prefs = getSharedPreferences("fscc_prefs", MODE_PRIVATE)
+                val modeStr = intent.getStringExtra(EXTRA_MODE) ?: prefs.getString("app_mode", null)
+                val strictFallback = intent.getBooleanExtra(EXTRA_STRICT_OFFLINE, true)
+                val startMode = FsccMode.fromPref(modeStr, strictFallback)
                 val autoHotspot = intent.getBooleanExtra(EXTRA_AUTO_HOTSPOT, false)
-                val modeTag = if (strict) "FSCC" else "90DNS"
-                val label = if (iface.isNotEmpty()) "$modeTag sur $iface ($ip)" else "$modeTag démarrage..."
+                val label = if (iface.isNotEmpty()) "${startMode.label} sur $iface ($ip)" else "${startMode.label} démarrage..."
                 startForegroundNotif(label)
                 if (!running.get()) {
-                    startAll(iface, ip, strict, autoHotspot)
+                    startAll(iface, ip, startMode, autoHotspot)
                 }
             }
         }
@@ -101,7 +128,15 @@ class FsccService : Service() {
         super.onDestroy()
     }
 
-    private fun startForegroundNotif(text: String) {
+    private fun loadListsFromPrefs() {
+        val prefs = getSharedPreferences("fscc_prefs", MODE_PRIVATE)
+        val wlRaw = prefs.getString("whitelist_raw", FsccBus.DEFAULT_WHITELIST) ?: FsccBus.DEFAULT_WHITELIST
+        val extraRaw = prefs.getString("extra_blocked_raw", "") ?: ""
+        FsccBus.whitelistDomains = FsccBus.parseDomainList(wlRaw)
+        FsccBus.extraBlockedDomains = FsccBus.parseDomainList(extraRaw)
+    }
+
+    private fun buildNotification(text: String): Notification {
         val nm = getSystemService(NotificationManager::class.java)
         if (Build.VERSION.SDK_INT >= 26) {
             val ch = NotificationChannel(CHANNEL_ID, "FSCC Server", NotificationManager.IMPORTANCE_LOW)
@@ -111,6 +146,17 @@ class FsccService : Service() {
             this, 0, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
+        val cycleIntent = Intent(this, FsccService::class.java).apply { action = ACTION_CYCLE_MODE }
+        val cyclePi = PendingIntent.getService(
+            this, 2, cycleIntent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+        val cycleAction = Notification.Action.Builder(
+            Icon.createWithResource(this, android.R.drawable.ic_popup_sync),
+            "Mode ⇄",
+            cyclePi
+        ).build()
+
         val stopIntent = Intent(this, FsccService::class.java).apply { action = ACTION_STOP }
         val stopPi = PendingIntent.getService(
             this, 1, stopIntent,
@@ -128,19 +174,31 @@ class FsccService : Service() {
             @Suppress("DEPRECATION")
             Notification.Builder(this)
         }
-        val notif = builder
-            .setContentTitle("FSCC Switch")
+        return builder
+            .setContentTitle("FSCC Switch [${currentMode.label}]")
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentIntent(pi)
+            .addAction(cycleAction)
             .addAction(stopAction)
+            .setOnlyAlertOnce(true)
             .setOngoing(true)
             .build()
+    }
 
+    private fun startForegroundNotif(text: String) {
+        val notif = buildNotification(text)
         if (Build.VERSION.SDK_INT >= 34) {
             startForeground(1, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
         } else {
             startForeground(1, notif)
+        }
+    }
+
+    private fun refreshNotif(text: String) {
+        runCatching {
+            val nm = getSystemService(NotificationManager::class.java)
+            nm.notify(1, buildNotification(text))
         }
     }
 
@@ -180,16 +238,16 @@ class FsccService : Service() {
 
     private fun runHotspotCtl(action: String): Boolean {
         val apkPath = applicationInfo.sourceDir
-        val cmd = "CLASSPATH=" + "\"" + apkPath + "\"" + " app_process /system/bin com.fscc.android.HotspotCtl " + action
+        val cmd = "CLASSPATH=" + """ + apkPath + """ + " app_process /system/bin com.fscc.android.HotspotCtl " + action
         return runSu(cmd)
     }
 
-    private fun startAll(ifaceParam: String, ipParam: String, strictOffline: Boolean, autoHotspot: Boolean) {
+    private fun startAll(ifaceParam: String, ipParam: String, startMode: FsccMode, autoHotspot: Boolean) {
         running.set(true)
-        currentStrict = strictOffline
+        currentMode = startMode
         manageHotspot = autoHotspot
         hotspotStartedByUs = false
-        FsccBus.modeLabel = if (strictOffline) "FSCC STRICT" else "90DNS"
+        FsccBus.mode = startMode
         FsccBus.resetStats()
 
         runCatching {
@@ -257,7 +315,7 @@ class FsccService : Service() {
                 httpServer = ServerSocket(HTTP_PORT).apply { reuseAddress = true }
                 tcpDnsServer = ServerSocket(DNS_PORT).apply { reuseAddress = true }
 
-                val ok = applyIptables(iface, ip, strictOffline)
+                val ok = applyIptables(iface, ip, startMode == FsccMode.STRICT)
                 if (!ok) {
                     FsccBus.log("ERREUR : Accès root (su) ou iptables refusé !")
                     stopAll()
@@ -265,19 +323,18 @@ class FsccService : Service() {
                     return@execute
                 }
 
-                val modeTag = if (strictOffline) "FSCC STRICT" else "90DNS INTERNET"
-                startForegroundNotif("$modeTag actif sur $iface ($ip)")
+                startForegroundNotif("$iface ($ip) • OK:0 | Bloq:0")
                 FsccBus.isRunning = true
                 FsccBus.activeIface = iface
                 FsccBus.activeIp = ip
                 FsccBus.notifyState()
                 syncTile()
-                FsccBus.log("Démarré [$modeTag] sur $iface ($ip) | DNS:$DNS_PORT HTTP:$HTTP_PORT")
+                FsccBus.log("Démarré [${startMode.label}] sur $iface ($ip) | DNS:$DNS_PORT HTTP:$HTTP_PORT")
 
                 pool.execute { runUdpDnsLoop(ip, ipBytes) }
                 pool.execute { runTcpDnsLoop(ip, ipBytes) }
                 pool.execute { runHttpLoop() }
-                pool.execute { runWatchdog(iface) }
+                pool.execute { runWatchdog(iface, ip) }
             } catch (e: Exception) {
                 FsccBus.log("ERREUR démarrage : ${e.message}")
                 stopAll()
@@ -286,7 +343,46 @@ class FsccService : Service() {
         }
     }
 
-    private fun runWatchdog(iface: String) {
+    private fun switchModeLive(newMode: FsccMode) {
+        synchronized(modeLock) {
+            if (!running.get() || currentIface.isEmpty() || newMode == currentMode) return
+            val iface = currentIface
+            val strict = (newMode == FsccMode.STRICT)
+            if (strict) {
+                currentMode = newMode
+            }
+            val cmd = if (strict) {
+                "iptables -w -F FSCC_FWD && " +
+                "iptables -w -A FSCC_FWD -i $iface -j DROP && " +
+                "iptables -w -A FSCC_FWD -o $iface -j DROP"
+            } else {
+                "iptables -w -F FSCC_FWD && " +
+                "iptables -w -A FSCC_FWD -i $iface -p tcp --dport 853 -j DROP && " +
+                "iptables -w -A FSCC_FWD -i $iface -p udp --dport 853 -j DROP && " +
+                "iptables -w -A FSCC_FWD -i $iface -j ACCEPT && " +
+                "iptables -w -A FSCC_FWD -o $iface -j ACCEPT"
+            }
+            if (runSu(cmd)) {
+                currentMode = newMode
+                FsccBus.mode = newMode
+                getSharedPreferences("fscc_prefs", MODE_PRIVATE).edit()
+                    .putString("app_mode", newMode.prefValue)
+                    .putBoolean("strict_offline", strict)
+                    .apply()
+                refreshNotif("$iface ($currentIp) • OK:${FsccBus.allowedCount} | Bloq:${FsccBus.blockedCount}")
+                FsccBus.log("Bascule à chaud -> [${newMode.label}] (hotspot conservé)")
+                FsccBus.notifyState()
+                syncTile()
+            } else {
+                FsccBus.log("ERREUR : Échec bascule à chaud vers ${newMode.label}")
+            }
+        }
+    }
+
+    private fun runWatchdog(iface: String, ip: String) {
+        var lastAllowed = -1
+        var lastBlocked = -1
+        var lastMode = currentMode
         while (running.get()) {
             try {
                 Thread.sleep(3000)
@@ -299,6 +395,15 @@ class FsccService : Service() {
                 stopAll()
                 stopSelf()
                 break
+            }
+            val a = FsccBus.allowedCount
+            val b = FsccBus.blockedCount
+            val m = currentMode
+            if (a != lastAllowed || b != lastBlocked || m != lastMode) {
+                lastAllowed = a
+                lastBlocked = b
+                lastMode = m
+                refreshNotif("$iface ($ip) • OK:$a | Bloq:$b")
             }
         }
     }
@@ -360,7 +465,7 @@ class FsccService : Service() {
                 val clientIp = pkt.address.hostAddress ?: "?"
                 val addr = pkt.address
                 val port = pkt.port
-                if (currentStrict) {
+                if (currentMode == FsccMode.STRICT) {
                     val res = buildDnsResponse(req, clientIp, localIp, ipBytes) ?: continue
                     udpDnsSocket?.send(DatagramPacket(res, res.size, addr, port))
                 } else {
@@ -430,7 +535,7 @@ class FsccService : Service() {
                     val line = reader.readLine() ?: break
                     if (line.isEmpty()) break
                     if (line.lowercase().startsWith("host:")) {
-                        host = line.substringAfter(":").trim().lowercase()
+                        host = line.substringAfter(":").trim().lowercase().substringBefore(":")
                     }
                 }
                 val clientIp = s.inetAddress.hostAddress ?: "?"
@@ -472,7 +577,49 @@ class FsccService : Service() {
 
     private fun isNintendoBlocked(domain: String): Boolean {
         if (domain.contains("nintendo")) return true
-        return BLOCKED_SUFFIXES.any { s -> domain == s || domain.endsWith(".$s") }
+        if (BLOCKED_SUFFIXES.any { s -> domain == s || domain.endsWith(".$s") }) return true
+        return FsccBus.extraBlockedDomains.any { s -> domain == s || domain.endsWith(".$s") }
+    }
+
+    private fun isWhitelisted(domain: String): Boolean {
+        return FsccBus.whitelistDomains.any { s -> domain == s || domain.endsWith(".$s") }
+    }
+
+    private fun buildBlockedZeroResponse(
+        txId: ByteArray,
+        question: ByteArray,
+        qType: Int,
+        domain: String,
+        clientIp: String,
+        tag: String
+    ): ByteArray {
+        return when (qType) {
+            1 -> {
+                FsccBus.log("[$tag] $domain ($clientIp) -> 0.0.0.0")
+                txId + byteArrayOf(
+                    0x81.toByte(), 0x80.toByte(), 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00
+                ) + question + byteArrayOf(
+                    0xC0.toByte(), 0x0C, 0x00, 0x01, 0x00, 0x01,
+                    0x00, 0x00, 0x00, 0x3C, 0x00, 0x04,
+                    0x00, 0x00, 0x00, 0x00
+                )
+            }
+            28 -> {
+                FsccBus.log("[$tag] $domain ($clientIp) -> ::")
+                txId + byteArrayOf(
+                    0x81.toByte(), 0x80.toByte(), 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00
+                ) + question + byteArrayOf(
+                    0xC0.toByte(), 0x0C, 0x00, 0x1C, 0x00, 0x01,
+                    0x00, 0x00, 0x00, 0x3C, 0x00, 0x10
+                ) + ByteArray(16)
+            }
+            else -> {
+                FsccBus.log("[$tag] $domain ($clientIp) [type=$qType] -> vide")
+                txId + byteArrayOf(
+                    0x81.toByte(), 0x80.toByte(), 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+                ) + question
+            }
+        }
     }
 
     private fun forwardDnsUpstream(req: ByteArray): ByteArray? {
@@ -517,6 +664,7 @@ class FsccService : Service() {
             domain == "90dns.test" || domain.endsWith(".90dns.test")
 
         if (isTestDomain) {
+            FsccBus.recordDomain(domain, "CHECK")
             return if (qType == 1) {
                 FsccBus.incAllowed(clientIp)
                 FsccBus.log("[CHECK-OK] $domain ($clientIp) -> $localIp")
@@ -533,8 +681,10 @@ class FsccService : Service() {
             }
         }
 
-        if (currentStrict) {
+        val modeNow = currentMode
+        if (modeNow == FsccMode.STRICT) {
             FsccBus.incBlocked(clientIp)
+            FsccBus.recordDomain(domain, "BLOQUÉ")
             FsccBus.log("[BLOQUÉ] $domain ($clientIp) -> NXDOMAIN")
             return txId + byteArrayOf(
                 0x81.toByte(), 0x83.toByte(), 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
@@ -543,33 +693,14 @@ class FsccService : Service() {
 
         if (isNintendoBlocked(domain)) {
             FsccBus.incBlocked(clientIp)
-            return when (qType) {
-                1 -> {
-                    FsccBus.log("[90DNS-BLOQUÉ] $domain ($clientIp) -> 0.0.0.0")
-                    txId + byteArrayOf(
-                        0x81.toByte(), 0x80.toByte(), 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00
-                    ) + question + byteArrayOf(
-                        0xC0.toByte(), 0x0C, 0x00, 0x01, 0x00, 0x01,
-                        0x00, 0x00, 0x00, 0x3C, 0x00, 0x04,
-                        0x00, 0x00, 0x00, 0x00
-                    )
-                }
-                28 -> {
-                    FsccBus.log("[90DNS-BLOQUÉ] $domain ($clientIp) -> ::")
-                    txId + byteArrayOf(
-                        0x81.toByte(), 0x80.toByte(), 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00
-                    ) + question + byteArrayOf(
-                        0xC0.toByte(), 0x0C, 0x00, 0x1C, 0x00, 0x01,
-                        0x00, 0x00, 0x00, 0x3C, 0x00, 0x10
-                    ) + ByteArray(16)
-                }
-                else -> {
-                    FsccBus.log("[90DNS-BLOQUÉ] $domain ($clientIp) [type=$qType] -> vide")
-                    txId + byteArrayOf(
-                        0x81.toByte(), 0x80.toByte(), 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-                    ) + question
-                }
-            }
+            FsccBus.recordDomain(domain, "BLOQUÉ")
+            return buildBlockedZeroResponse(txId, question, qType, domain, clientIp, "90DNS-BLOQUÉ")
+        }
+
+        if (modeNow == FsccMode.WHITELIST && !isWhitelisted(domain)) {
+            FsccBus.incBlocked(clientIp)
+            FsccBus.recordDomain(domain, "WL-BLOQUÉ")
+            return buildBlockedZeroResponse(txId, question, qType, domain, clientIp, "WL-BLOQUÉ")
         }
 
         if (qType == 28 || qType == 65) {
@@ -581,7 +712,9 @@ class FsccService : Service() {
         val upstream = forwardDnsUpstream(req)
         return if (upstream != null) {
             FsccBus.incAllowed(clientIp)
-            FsccBus.log("[90DNS-PASS] $domain ($clientIp)")
+            val isNew = FsccBus.recordDomain(domain, "PASS")
+            val tag = if (modeNow == FsccMode.WHITELIST) "WL-PASS" else if (isNew) "90DNS-NOUVEAU" else "90DNS-PASS"
+            FsccBus.log("[$tag] $domain ($clientIp)")
             upstream
         } else {
             txId + byteArrayOf(

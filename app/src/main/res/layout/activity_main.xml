@@ -39,7 +39,7 @@
         android:orientation="horizontal"
         android:gravity="center_vertical"
         android:layout_marginTop="4dp"
-        android:layout_marginBottom="10dp">
+        android:layout_marginBottom="8dp">
 
         <Spinner
             android:id="@+id/spinnerIfaces"
@@ -65,34 +65,99 @@
         android:textColor="#EAEAEA"
         android:layout_marginBottom="8dp" />
 
-    <androidx.appcompat.widget.SwitchCompat
-        android:id="@+id/switchOffline"
+    <RadioGroup
+        android:id="@+id/rgMode"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:checked="true"
-        android:text="Mode FSCC strict (décocher pour mode 90DNS)"
-        android:textColor="#EAEAEA"
-        android:layout_marginBottom="12dp" />
+        android:orientation="horizontal"
+        android:layout_marginBottom="8dp">
+
+        <RadioButton
+            android:id="@+id/rbStrict"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:checked="true"
+            android:text="FSCC Strict"
+            android:textColor="#EAEAEA"
+            android:textSize="13sp" />
+
+        <RadioButton
+            android:id="@+id/rb90dns"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="90DNS"
+            android:textColor="#EAEAEA"
+            android:textSize="13sp" />
+
+        <RadioButton
+            android:id="@+id/rbWhitelist"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:text="Whitelist"
+            android:textColor="#EAEAEA"
+            android:textSize="13sp" />
+    </RadioGroup>
+
+    <LinearLayout
+        android:id="@+id/layoutWhitelist"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="center_vertical"
+        android:visibility="gone"
+        android:layout_marginBottom="8dp">
+
+        <EditText
+            android:id="@+id/editWhitelist"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:hint="youtube.com, github.com..."
+            android:textColor="#EAEAEA"
+            android:textColorHint="#6B7280"
+            android:textSize="12sp"
+            android:background="#1F242B"
+            android:padding="8dp"
+            android:maxLines="2"
+            android:inputType="textNoSuggestions|textMultiLine" />
+
+        <Button
+            android:id="@+id/btnSaveWhitelist"
+            android:layout_width="wrap_content"
+            android:layout_height="40dp"
+            android:layout_marginStart="8dp"
+            android:text="OK" />
+    </LinearLayout>
 
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:orientation="horizontal"
-        android:layout_marginBottom="12dp">
+        android:layout_marginBottom="10dp">
 
         <Button
             android:id="@+id/btnToggle"
             android:layout_width="0dp"
             android:layout_height="48dp"
             android:layout_weight="1"
-            android:text="Démarrer FSCC" />
+            android:text="Démarrer FSCC Strict" />
+
+        <Button
+            android:id="@+id/btnDomains"
+            android:layout_width="wrap_content"
+            android:layout_height="48dp"
+            android:layout_marginStart="6dp"
+            android:text="Domaines (0)" />
 
         <Button
             android:id="@+id/btnClear"
             android:layout_width="wrap_content"
             android:layout_height="48dp"
-            android:layout_marginStart="8dp"
-            android:text="Vider logs" />
+            android:layout_marginStart="6dp"
+            android:text="Vider" />
     </LinearLayout>
 
     <ScrollView

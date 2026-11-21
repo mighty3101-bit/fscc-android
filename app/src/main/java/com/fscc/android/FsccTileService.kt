@@ -23,12 +23,16 @@ class FsccTileService : TileService() {
             startService(i)
         } else {
             val prefs = getSharedPreferences("fscc_prefs", Context.MODE_PRIVATE)
-            val strict = prefs.getBoolean("strict_offline", true)
+            val mode = FsccMode.fromPref(
+                prefs.getString("app_mode", null),
+                prefs.getBoolean("strict_offline", true)
+            )
             val i = Intent(this, FsccService::class.java).apply {
                 action = FsccService.ACTION_START
                 putExtra(FsccService.EXTRA_IFACE, "")
                 putExtra(FsccService.EXTRA_IP, "")
-                putExtra(FsccService.EXTRA_STRICT_OFFLINE, strict)
+                putExtra(FsccService.EXTRA_MODE, mode.prefValue)
+                putExtra(FsccService.EXTRA_STRICT_OFFLINE, mode == FsccMode.STRICT)
                 putExtra(FsccService.EXTRA_AUTO_HOTSPOT, true)
             }
             ContextCompat.startForegroundService(this, i)
@@ -39,19 +43,21 @@ class FsccTileService : TileService() {
     private fun refreshTile() {
         val tile = qsTile ?: return
         val prefs = getSharedPreferences("fscc_prefs", Context.MODE_PRIVATE)
-        val strict = prefs.getBoolean("strict_offline", true)
+        val mode = FsccMode.fromPref(
+            prefs.getString("app_mode", null),
+            prefs.getBoolean("strict_offline", true)
+        )
         if (FsccBus.isRunning) {
             tile.state = Tile.STATE_ACTIVE
             tile.label = "FSCC Switch"
             if (Build.VERSION.SDK_INT >= 29) {
-                val tag = if (FsccBus.modeLabel == "90DNS") "90DNS" else "FSCC"
-                tile.subtitle = "$tag ${FsccBus.activeIface}"
+                tile.subtitle = "${FsccBus.mode.label} ${FsccBus.activeIface}"
             }
         } else {
             tile.state = Tile.STATE_INACTIVE
             tile.label = "FSCC Switch"
             if (Build.VERSION.SDK_INT >= 29) {
-                tile.subtitle = if (strict) "Mode FSCC Strict" else "Mode 90DNS"
+                tile.subtitle = mode.label
             }
         }
         tile.updateTile()

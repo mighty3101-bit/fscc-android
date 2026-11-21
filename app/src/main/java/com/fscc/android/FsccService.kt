@@ -543,10 +543,33 @@ class FsccService : Service() {
 
         if (isNintendoBlocked(domain)) {
             FsccBus.incBlocked(clientIp)
-            FsccBus.log("[90DNS-BLOQUÉ] $domain ($clientIp) -> NXDOMAIN")
-            return txId + byteArrayOf(
-                0x81.toByte(), 0x83.toByte(), 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
-            ) + question
+            return when (qType) {
+                1 -> {
+                    FsccBus.log("[90DNS-BLOQUÉ] $domain ($clientIp) -> 0.0.0.0")
+                    txId + byteArrayOf(
+                        0x81.toByte(), 0x80.toByte(), 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00
+                    ) + question + byteArrayOf(
+                        0xC0.toByte(), 0x0C, 0x00, 0x01, 0x00, 0x01,
+                        0x00, 0x00, 0x00, 0x3C, 0x00, 0x04,
+                        0x00, 0x00, 0x00, 0x00
+                    )
+                }
+                28 -> {
+                    FsccBus.log("[90DNS-BLOQUÉ] $domain ($clientIp) -> ::")
+                    txId + byteArrayOf(
+                        0x81.toByte(), 0x80.toByte(), 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00
+                    ) + question + byteArrayOf(
+                        0xC0.toByte(), 0x0C, 0x00, 0x1C, 0x00, 0x01,
+                        0x00, 0x00, 0x00, 0x3C, 0x00, 0x10
+                    ) + ByteArray(16)
+                }
+                else -> {
+                    FsccBus.log("[90DNS-BLOQUÉ] $domain ($clientIp) [type=$qType] -> vide")
+                    txId + byteArrayOf(
+                        0x81.toByte(), 0x80.toByte(), 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+                    ) + question
+                }
+            }
         }
 
         if (qType == 28 || qType == 65) {
@@ -602,6 +625,8 @@ class FsccService : Service() {
             sb.append(" && iptables -w -A FSCC_FWD -i $iface -j DROP")
             sb.append(" && iptables -w -A FSCC_FWD -o $iface -j DROP")
         } else {
+            sb.append(" && iptables -w -A FSCC_FWD -i $iface -p tcp --dport 853 -j DROP")
+            sb.append(" && iptables -w -A FSCC_FWD -i $iface -p udp --dport 853 -j DROP")
             sb.append(" && iptables -w -A FSCC_FWD -i $iface -j ACCEPT")
             sb.append(" && iptables -w -A FSCC_FWD -o $iface -j ACCEPT")
         }

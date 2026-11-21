@@ -8,6 +8,10 @@ object FsccBus {
     @Volatile var isRunning: Boolean = false
     @Volatile var activeIface: String = ""
     @Volatile var activeIp: String = ""
+    @Volatile var allowedCount: Int = 0
+    @Volatile var blockedCount: Int = 0
+    @Volatile var httpCount: Int = 0
+    @Volatile var lastClientIp: String = ""
 
     private val logs = ArrayDeque<String>(250)
     private var listener: (() -> Unit)? = null
@@ -27,8 +31,39 @@ object FsccBus {
     }
 
     @Synchronized
+    fun resetStats() {
+        allowedCount = 0
+        blockedCount = 0
+        httpCount = 0
+        lastClientIp = ""
+        listener?.invoke()
+    }
+
+    @Synchronized
+    fun incAllowed(clientIp: String) {
+        allowedCount++
+        lastClientIp = clientIp
+    }
+
+    @Synchronized
+    fun incBlocked(clientIp: String) {
+        blockedCount++
+        if (lastClientIp.isEmpty()) lastClientIp = clientIp
+    }
+
+    @Synchronized
+    fun incHttp(clientIp: String) {
+        httpCount++
+        lastClientIp = clientIp
+    }
+
+    @Synchronized
     fun clear() {
         logs.clear()
+        allowedCount = 0
+        blockedCount = 0
+        httpCount = 0
+        lastClientIp = ""
         listener?.invoke()
     }
 

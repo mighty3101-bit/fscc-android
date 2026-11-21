@@ -1,6 +1,7 @@
 package com.fscc.android
 
 import android.Manifest
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Color
@@ -26,6 +27,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     private lateinit var txtStatus: TextView
+    private lateinit var txtStats: TextView
     private lateinit var spinnerIfaces: Spinner
     private lateinit var switchAutoHotspot: SwitchCompat
     private lateinit var switchOffline: SwitchCompat
@@ -43,6 +45,7 @@ class MainActivity : AppCompatActivity() {
         setContentView(R.layout.activity_main)
 
         txtStatus = findViewById(R.id.txtStatus)
+        txtStats = findViewById(R.id.txtStats)
         spinnerIfaces = findViewById(R.id.spinnerIfaces)
         switchAutoHotspot = findViewById(R.id.switchAutoHotspot)
         switchOffline = findViewById(R.id.switchOffline)
@@ -51,6 +54,17 @@ class MainActivity : AppCompatActivity() {
         btnClear = findViewById(R.id.btnClear)
         scrollLogs = findViewById(R.id.scrollLogs)
         txtLogs = findViewById(R.id.txtLogs)
+
+        val prefs = getSharedPreferences("fscc_prefs", Context.MODE_PRIVATE)
+        switchAutoHotspot.isChecked = prefs.getBoolean("auto_hotspot", true)
+        switchOffline.isChecked = prefs.getBoolean("strict_offline", true)
+
+        switchAutoHotspot.setOnCheckedChangeListener { _, checked ->
+            prefs.edit().putBoolean("auto_hotspot", checked).apply()
+        }
+        switchOffline.setOnCheckedChangeListener { _, checked ->
+            prefs.edit().putBoolean("strict_offline", checked).apply()
+        }
 
         if (Build.VERSION.SDK_INT >= 33 &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS)
@@ -148,12 +162,14 @@ class MainActivity : AppCompatActivity() {
             switchAutoHotspot.isEnabled = true
             switchOffline.isEnabled = true
         }
+        val client = if (FsccBus.lastClientIp.isNotEmpty()) FsccBus.lastClientIp else "—"
+        txtStats.text = "Autorisés : ${FsccBus.allowedCount}  |  Bloqués : ${FsccBus.blockedCount}  |  HTTP : ${FsccBus.httpCount}  |  Switch : $client"
         val text = FsccBus.snapshot()
         if (text.isNotEmpty()) {
             txtLogs.text = text
             scrollLogs.post { scrollLogs.fullScroll(View.FOCUS_DOWN) }
         } else {
-            txtLogs.text = "Prêt. Appuie sur Démarrer FSCC (le hotspot démarrera tout seul).\n"
+            txtLogs.text = "Prêt. Appuie sur Démarrer FSCC ou utilise la tuile Réglages Rapides.\n"
         }
     }
 }

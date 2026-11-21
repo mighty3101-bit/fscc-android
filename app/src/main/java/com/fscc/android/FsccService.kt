@@ -5,10 +5,14 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.app.Service
+import android.content.ComponentName
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.graphics.drawable.Icon
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
+import android.service.quicksettings.TileService
 import java.io.BufferedReader
 import java.io.DataInputStream
 import java.io.DataOutputStream
@@ -41,6 +45,7 @@ class FsccService : Service() {
     private var udpDnsSocket: DatagramSocket? = null
     private var tcpDnsServer: ServerSocket? = null
     private var httpServer: ServerSocket? = null
+    private var wakeLock: PowerManager.WakeLock? = null
     private var currentIface: String = ""
     private var currentIp: String = ""
     @Volatile private var manageHotspot: Boolean = false
@@ -85,6 +90,17 @@ class FsccService : Service() {
             this, 0, Intent(this, MainActivity::class.java),
             PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
         )
+        val stopIntent = Intent(this, FsccService::class.java).apply { action = ACTION_STOP }
+        val stopPi = PendingIntent.getService(
+            this, 1, stopIntent,
+            PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT
+        )
+        val stopAction = Notification.Action.Builder(
+            Icon.createWithResource(this, android.R.drawable.ic_menu_close_clear_cancel),
+            "Arrêter FSCC",
+            stopPi
+        ).build()
+
         val builder = if (Build.VERSION.SDK_INT >= 26) {
             Notification.Builder(this, CHANNEL_ID)
         } else {
@@ -96,6 +112,7 @@ class FsccService : Service() {
             .setContentText(text)
             .setSmallIcon(android.R.drawable.ic_dialog_info)
             .setContentIntent(pi)
+            .addAction(stopAction)
             .setOngoing(true)
             .build()
 
@@ -103,6 +120,12 @@ class FsccService : Service() {
             startForeground(1, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE)
         } else {
             startForeground(1, notif)
+        }
+    }
+
+    private fun syncTile() {
+        runCatching {
+            TileService.requestListeningState(this, ComponentName(this, FsccTileService::class.java))
         }
     }
 
@@ -125,6 +148,15 @@ class FsccService : Service() {
         return null
     }
 
+    private fun isIfaceUp(iface: String): Boolean {
+        return try {
+            val ni = NetworkInterface.getByName(iface) ?: return false
+            ni.isUp && ni.inetAddresses.toList().any { it is Inet4Address && !it.isLoopbackAddress }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
     private fun runHotspotCtl(action: String): Boolean {
         val apkPath = applicationInfo.sourceDir
         val cmd = "CLASSPATH=" + "\"" + apkPath + "\"" + " app_process /system/bin com.fscc.android.HotspotCtl " + action
@@ -135,6 +167,15 @@ class FsccService : Service() {
         running.set(true)
         manageHotspot = autoHotspot
         hotspotStartedByUs = false
+        FsccBus.resetStats()
+
+        runCatching {
+            val pm = getSystemService(PowerManager::class.java)
+            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "fscc:server").apply {
+                setReferenceCounted(false)
+                acquire(12 * 60 * 60 * 1000L)
+            }
+        }
 
         pool.execute {
             try {
@@ -205,15 +246,34 @@ class FsccService : Service() {
                 FsccBus.activeIface = iface
                 FsccBus.activeIp = ip
                 FsccBus.notifyState()
+                syncTile()
                 FsccBus.log("FSCC démarré sur $iface ($ip) | DNS:$DNS_PORT HTTP:$HTTP_PORT")
 
                 pool.execute { runUdpDnsLoop(ip, ipBytes) }
                 pool.execute { runTcpDnsLoop(ip, ipBytes) }
                 pool.execute { runHttpLoop() }
+                pool.execute { runWatchdog(iface) }
             } catch (e: Exception) {
                 FsccBus.log("ERREUR démarrage : ${e.message}")
                 stopAll()
                 stopSelf()
+            }
+        }
+    }
+
+    private fun runWatchdog(iface: String) {
+        while (running.get()) {
+            try {
+                Thread.sleep(3000)
+            } catch (_: InterruptedException) {
+                break
+            }
+            if (!running.get()) break
+            if (!isIfaceUp(iface)) {
+                FsccBus.log("Hotspot coupé depuis le système -> nettoyage FSCC")
+                stopAll()
+                stopSelf()
+                break
             }
         }
     }
@@ -227,6 +287,11 @@ class FsccService : Service() {
         tcpDnsServer = null
         httpServer = null
 
+        runCatching {
+            if (wakeLock?.isHeld == true) wakeLock?.release()
+            wakeLock = null
+        }
+
         val hadIface = currentIface.isNotEmpty()
         currentIface = ""
         currentIp = ""
@@ -238,7 +303,7 @@ class FsccService : Service() {
         val shouldStopHs = manageHotspot && hotspotStartedByUs
         manageHotspot = false
         hotspotStartedByUs = false
-        if (shouldStopHs) {
+        if (shouldStopHs && findHotspotIface() != null) {
             if (runHotspotCtl("stop")) {
                 FsccBus.log("Hotspot coupé automatiquement")
             } else {
@@ -250,6 +315,7 @@ class FsccService : Service() {
         FsccBus.activeIface = ""
         FsccBus.activeIp = ""
         FsccBus.notifyState()
+        syncTile()
     }
 
     private fun runUdpDnsLoop(localIp: String, ipBytes: ByteArray) {
@@ -315,19 +381,25 @@ class FsccService : Service() {
                 val reader = BufferedReader(InputStreamReader(s.getInputStream()))
                 val firstLine = reader.readLine() ?: ""
                 val path = firstLine.split(" ").getOrNull(1) ?: "/"
+                val isHead = firstLine.startsWith("HEAD ")
                 while (true) {
                     val line = reader.readLine() ?: break
                     if (line.isEmpty()) break
                 }
-                FsccBus.log("[HTTP-CHECK] Switch (${s.inetAddress.hostAddress}) -> $path")
-                val resp = (
+                val clientIp = s.inetAddress.hostAddress ?: "?"
+                FsccBus.incHttp(clientIp)
+                FsccBus.log("[HTTP-CHECK] Switch ($clientIp) -> $path")
+                val header = (
                     "HTTP/1.1 200 OK\r\n" +
                     "Content-Type: text/plain\r\n" +
                     "X-Organization: Nintendo\r\n" +
                     "Content-Length: 2\r\n" +
-                    "Connection: close\r\n\r\nok"
+                    "Connection: close\r\n\r\n"
                 ).toByteArray(Charsets.US_ASCII)
-                s.getOutputStream().write(resp)
+                s.getOutputStream().write(header)
+                if (!isHead) {
+                    s.getOutputStream().write("ok".toByteArray(Charsets.US_ASCII))
+                }
                 s.getOutputStream().flush()
             } catch (_: Exception) {}
         }
@@ -356,6 +428,7 @@ class FsccService : Service() {
 
         return if (domain.contains("ctest") || domain.contains("conntest")) {
             if (qType == 1) {
+                FsccBus.incAllowed(clientIp)
                 FsccBus.log("[AUTORISÉ] $domain ($clientIp) -> $localIp")
                 txId + byteArrayOf(
                     0x81.toByte(), 0x80.toByte(), 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00
@@ -369,6 +442,7 @@ class FsccService : Service() {
                 ) + question
             }
         } else {
+            FsccBus.incBlocked(clientIp)
             FsccBus.log("[BLOQUÉ] $domain ($clientIp) -> NXDOMAIN")
             txId + byteArrayOf(
                 0x81.toByte(), 0x83.toByte(), 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
@@ -409,9 +483,11 @@ class FsccService : Service() {
         if (strictOffline) {
             sb.append(" && iptables -w -N FSCC_FWD")
             sb.append(" && iptables -w -A FSCC_FWD -i $iface -j DROP")
+            sb.append(" && iptables -w -A FSCC_FWD -o $iface -j DROP")
             sb.append(" && iptables -w -I FORWARD 1 -j FSCC_FWD")
             sb.append(" && (ip6tables -w -N FSCC_FWD6 2>/dev/null || true)")
             sb.append(" && (ip6tables -w -A FSCC_FWD6 -i $iface -j DROP 2>/dev/null || true)")
+            sb.append(" && (ip6tables -w -A FSCC_FWD6 -o $iface -j DROP 2>/dev/null || true)")
             sb.append(" && (ip6tables -w -I FORWARD 1 -j FSCC_FWD6 2>/dev/null || true)")
             sb.append(" && (ip6tables -w -N FSCC_IN6 2>/dev/null || true)")
             sb.append(" && (ip6tables -w -A FSCC_IN6 -i $iface -p udp --dport 53 -j REJECT 2>/dev/null || true)")

@@ -11,11 +11,24 @@ android {
         applicationId = "com.fscc.android"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 2
+        versionName = "2.0"
+    }
+
+    signingConfigs {
+        getByName("debug") {
+            storeFile = file("fscc-debug.p12")
+            storePassword = "android"
+            keyAlias = "fsccdebug"
+            keyPassword = "android"
+            storeType = "PKCS12"
+        }
     }
 
     buildTypes {
+        debug {
+            signingConfig = signingConfigs.getByName("debug")
+        }
         release {
             isMinifyEnabled = false
         }

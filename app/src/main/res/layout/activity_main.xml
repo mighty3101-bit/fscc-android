@@ -70,7 +70,7 @@
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:checked="true"
-        android:text="Bloquer tout Internet sur le hotspot (mode FSCC strict)"
+        android:text="Mode FSCC strict (décocher pour 90DNS + Internet KaiTube)"
         android:textColor="#EAEAEA"
         android:layout_marginBottom="12dp" />
 
@@ -110,6 +110,6 @@
             android:fontFamily="monospace"
             android:textColor="#D0E0D0"
             android:textSize="12sp"
-            android:text="Prêt. Appuie sur Démarrer FSCC." />
+            android:text="Prêt. Choisis ton mode et appuie sur Démarrer." />
     </ScrollView>
 </LinearLayout>

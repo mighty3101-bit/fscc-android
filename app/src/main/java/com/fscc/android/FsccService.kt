@@ -20,6 +20,7 @@ import java.io.InputStreamReader
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.Inet4Address
+import java.net.InetAddress
 import java.net.NetworkInterface
 import java.net.ServerSocket
 import java.net.Socket
@@ -38,6 +39,24 @@ class FsccService : Service() {
         private const val DNS_PORT = 5354
         private const val HTTP_PORT = 8095
         private const val CHANNEL_ID = "fscc_channel"
+
+        private val BLOCKED_SUFFIXES = listOf(
+            "nintendo.com", "nintendo.net", "nintendo.jp", "nintendo.co.jp",
+            "nintendo.co.uk", "nintendo-europe.com", "nintendowifi.net",
+            "nintendo.es", "nintendo.co.kr", "nintendo.tw", "nintendo.com.hk",
+            "nintendo.com.au", "nintendo.co.nz", "nintendo.at", "nintendo.be",
+            "nintendods.cz", "nintendo.dk", "nintendo.de", "nintendo.fi",
+            "nintendo.fr", "nintendo.gr", "nintendo.hu", "nintendo.it",
+            "nintendo.nl", "nintendo.no", "nintendo.pt", "nintendo.ru",
+            "nintendo.co.za", "nintendo.se", "nintendo.ch", "nintendo.pl",
+            "nintendoswitch.com", "nintendoswitch.com.cn", "nintendoswitch.cn",
+            "nintendocdn.com", "nintendowifi.com", "nintendods.com",
+            "nintendogamecube.com", "nintendo.org", "nintendo.biz",
+            "nintendo.info", "nintendo.tv", "nintendo.lu", "nintendo-europe-sales.com",
+            "nega-lp1-upload.s3.us-east-1.amazonaws.com",
+            "scsi-upload-lp1.s3.us-west-2.amazonaws.com",
+            "google-analytics.com", "googletagmanager.com"
+        )
     }
 
     private val running = AtomicBoolean(false)
@@ -48,6 +67,7 @@ class FsccService : Service() {
     private var wakeLock: PowerManager.WakeLock? = null
     private var currentIface: String = ""
     private var currentIp: String = ""
+    @Volatile private var currentStrict: Boolean = true
     @Volatile private var manageHotspot: Boolean = false
     @Volatile private var hotspotStartedByUs: Boolean = false
 
@@ -64,8 +84,9 @@ class FsccService : Service() {
                 val ip = intent.getStringExtra(EXTRA_IP).orEmpty()
                 val strict = intent.getBooleanExtra(EXTRA_STRICT_OFFLINE, true)
                 val autoHotspot = intent.getBooleanExtra(EXTRA_AUTO_HOTSPOT, false)
-                val label = if (iface.isNotEmpty()) "$iface ($ip)" else "auto hotspot"
-                startForegroundNotif("FSCC actif sur $label")
+                val modeTag = if (strict) "FSCC" else "90DNS"
+                val label = if (iface.isNotEmpty()) "$modeTag sur $iface ($ip)" else "$modeTag démarrage..."
+                startForegroundNotif(label)
                 if (!running.get()) {
                     startAll(iface, ip, strict, autoHotspot)
                 }
@@ -97,7 +118,7 @@ class FsccService : Service() {
         )
         val stopAction = Notification.Action.Builder(
             Icon.createWithResource(this, android.R.drawable.ic_menu_close_clear_cancel),
-            "Arrêter FSCC",
+            "Arrêter",
             stopPi
         ).build()
 
@@ -165,8 +186,10 @@ class FsccService : Service() {
 
     private fun startAll(ifaceParam: String, ipParam: String, strictOffline: Boolean, autoHotspot: Boolean) {
         running.set(true)
+        currentStrict = strictOffline
         manageHotspot = autoHotspot
         hotspotStartedByUs = false
+        FsccBus.modeLabel = if (strictOffline) "FSCC STRICT" else "90DNS"
         FsccBus.resetStats()
 
         runCatching {
@@ -179,6 +202,7 @@ class FsccService : Service() {
 
         pool.execute {
             try {
+                runSu("touch /dev/fscc_allowed")
                 var iface = ifaceParam
                 var ip = ipParam
 
@@ -214,7 +238,6 @@ class FsccService : Service() {
                         iface = found.first
                         ip = found.second
                     }
-                    startForegroundNotif("FSCC actif sur $iface ($ip)")
                 }
 
                 if (!iface.matches(Regex("^[a-zA-Z0-9._-]+$")) ||
@@ -242,12 +265,14 @@ class FsccService : Service() {
                     return@execute
                 }
 
+                val modeTag = if (strictOffline) "FSCC STRICT" else "90DNS INTERNET"
+                startForegroundNotif("$modeTag actif sur $iface ($ip)")
                 FsccBus.isRunning = true
                 FsccBus.activeIface = iface
                 FsccBus.activeIp = ip
                 FsccBus.notifyState()
                 syncTile()
-                FsccBus.log("FSCC démarré sur $iface ($ip) | DNS:$DNS_PORT HTTP:$HTTP_PORT")
+                FsccBus.log("Démarré [$modeTag] sur $iface ($ip) | DNS:$DNS_PORT HTTP:$HTTP_PORT")
 
                 pool.execute { runUdpDnsLoop(ip, ipBytes) }
                 pool.execute { runTcpDnsLoop(ip, ipBytes) }
@@ -297,7 +322,7 @@ class FsccService : Service() {
         currentIp = ""
         if (hadIface) {
             removeIptables()
-            FsccBus.log("FSCC arrêté (règles iptables nettoyées)")
+            FsccBus.log("Arrêté (règles iptables nettoyées)")
         }
 
         val shouldStopHs = manageHotspot && hotspotStartedByUs
@@ -305,10 +330,17 @@ class FsccService : Service() {
         hotspotStartedByUs = false
         if (shouldStopHs && findHotspotIface() != null) {
             if (runHotspotCtl("stop")) {
+                for (idx in 0 until 15) {
+                    if (findHotspotIface() == null) break
+                    Thread.sleep(200)
+                }
                 FsccBus.log("Hotspot coupé automatiquement")
             } else {
                 FsccBus.log("Attention : échec coupure automatique du hotspot")
             }
+        }
+        if (hadIface || shouldStopHs) {
+            runSu("rm -f /dev/fscc_allowed")
         }
 
         FsccBus.isRunning = false
@@ -326,8 +358,19 @@ class FsccService : Service() {
                 udpDnsSocket?.receive(pkt) ?: break
                 val req = pkt.data.copyOf(pkt.length)
                 val clientIp = pkt.address.hostAddress ?: "?"
-                val res = buildDnsResponse(req, clientIp, localIp, ipBytes) ?: continue
-                udpDnsSocket?.send(DatagramPacket(res, res.size, pkt.address, pkt.port))
+                val addr = pkt.address
+                val port = pkt.port
+                if (currentStrict) {
+                    val res = buildDnsResponse(req, clientIp, localIp, ipBytes) ?: continue
+                    udpDnsSocket?.send(DatagramPacket(res, res.size, addr, port))
+                } else {
+                    pool.execute {
+                        val res = buildDnsResponse(req, clientIp, localIp, ipBytes) ?: return@execute
+                        try {
+                            udpDnsSocket?.send(DatagramPacket(res, res.size, addr, port))
+                        } catch (_: Exception) {}
+                    }
+                }
             } catch (_: Exception) {
                 if (!running.get()) break
             }
@@ -382,27 +425,71 @@ class FsccService : Service() {
                 val firstLine = reader.readLine() ?: ""
                 val path = firstLine.split(" ").getOrNull(1) ?: "/"
                 val isHead = firstLine.startsWith("HEAD ")
+                var host = ""
                 while (true) {
                     val line = reader.readLine() ?: break
                     if (line.isEmpty()) break
+                    if (line.lowercase().startsWith("host:")) {
+                        host = line.substringAfter(":").trim().lowercase()
+                    }
                 }
                 val clientIp = s.inetAddress.hostAddress ?: "?"
                 FsccBus.incHttp(clientIp)
-                FsccBus.log("[HTTP-CHECK] Switch ($clientIp) -> $path")
+                FsccBus.log("[HTTP-CHECK] $host$path ($clientIp)")
+
+                val body: String
+                val ctype: String
+                val org: String
+                if (host.contains("conntest")) {
+                    body = "<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.0 Transitional//EN\" \"http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd\"><html><head><title>HTML Page</title></head><body bgcolor=\"#FFFFFF\">This is test.html page</body></html>"
+                    ctype = "text/html"
+                    org = "Nintendo"
+                } else if (host.endsWith("90dns.test")) {
+                    body = "You are successfully connected to 90DNS. Happy hacking!"
+                    ctype = "text/html"
+                    org = "LavaTech"
+                } else {
+                    body = "ok"
+                    ctype = "text/plain"
+                    org = "Nintendo"
+                }
+                val bodyBytes = body.toByteArray(Charsets.UTF_8)
                 val header = (
                     "HTTP/1.1 200 OK\r\n" +
-                    "Content-Type: text/plain\r\n" +
-                    "X-Organization: Nintendo\r\n" +
-                    "Content-Length: 2\r\n" +
+                    "Content-Type: $ctype\r\n" +
+                    "X-Organization: $org\r\n" +
+                    "Content-Length: ${bodyBytes.size}\r\n" +
                     "Connection: close\r\n\r\n"
                 ).toByteArray(Charsets.US_ASCII)
                 s.getOutputStream().write(header)
                 if (!isHead) {
-                    s.getOutputStream().write("ok".toByteArray(Charsets.US_ASCII))
+                    s.getOutputStream().write(bodyBytes)
                 }
                 s.getOutputStream().flush()
             } catch (_: Exception) {}
         }
+    }
+
+    private fun isNintendoBlocked(domain: String): Boolean {
+        if (domain.contains("nintendo")) return true
+        return BLOCKED_SUFFIXES.any { s -> domain == s || domain.endsWith(".$s") }
+    }
+
+    private fun forwardDnsUpstream(req: ByteArray): ByteArray? {
+        for (upstream in listOf("1.1.1.1", "8.8.8.8")) {
+            try {
+                DatagramSocket().use { ds ->
+                    ds.soTimeout = 2500
+                    val addr = InetAddress.getByName(upstream)
+                    ds.send(DatagramPacket(req, req.size, addr, 53))
+                    val buf = ByteArray(1500)
+                    val respPkt = DatagramPacket(buf, buf.size)
+                    ds.receive(respPkt)
+                    return respPkt.data.copyOf(respPkt.length)
+                }
+            } catch (_: Exception) {}
+        }
+        return null
     }
 
     private fun buildDnsResponse(req: ByteArray, clientIp: String, localIp: String, ipBytes: ByteArray): ByteArray? {
@@ -426,10 +513,13 @@ class FsccService : Service() {
         val question = req.copyOfRange(12, endOffset)
         val txId = byteArrayOf(req[0], req[1])
 
-        return if (domain.contains("ctest") || domain.contains("conntest")) {
-            if (qType == 1) {
+        val isTestDomain = domain.contains("ctest") || domain.contains("conntest") ||
+            domain == "90dns.test" || domain.endsWith(".90dns.test")
+
+        if (isTestDomain) {
+            return if (qType == 1) {
                 FsccBus.incAllowed(clientIp)
-                FsccBus.log("[AUTORISÉ] $domain ($clientIp) -> $localIp")
+                FsccBus.log("[CHECK-OK] $domain ($clientIp) -> $localIp")
                 txId + byteArrayOf(
                     0x81.toByte(), 0x80.toByte(), 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00
                 ) + question + byteArrayOf(
@@ -441,11 +531,38 @@ class FsccService : Service() {
                     0x81.toByte(), 0x80.toByte(), 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
                 ) + question
             }
-        } else {
+        }
+
+        if (currentStrict) {
             FsccBus.incBlocked(clientIp)
             FsccBus.log("[BLOQUÉ] $domain ($clientIp) -> NXDOMAIN")
-            txId + byteArrayOf(
+            return txId + byteArrayOf(
                 0x81.toByte(), 0x83.toByte(), 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+            ) + question
+        }
+
+        if (isNintendoBlocked(domain)) {
+            FsccBus.incBlocked(clientIp)
+            FsccBus.log("[90DNS-BLOQUÉ] $domain ($clientIp) -> NXDOMAIN")
+            return txId + byteArrayOf(
+                0x81.toByte(), 0x83.toByte(), 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+            ) + question
+        }
+
+        if (qType == 28 || qType == 65) {
+            return txId + byteArrayOf(
+                0x81.toByte(), 0x80.toByte(), 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
+            ) + question
+        }
+
+        val upstream = forwardDnsUpstream(req)
+        return if (upstream != null) {
+            FsccBus.incAllowed(clientIp)
+            FsccBus.log("[90DNS-PASS] $domain ($clientIp)")
+            upstream
+        } else {
+            txId + byteArrayOf(
+                0x81.toByte(), 0x82.toByte(), 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
             ) + question
         }
     }
@@ -480,20 +597,24 @@ class FsccService : Service() {
         sb.append("iptables -w -A FSCC_IN -i $iface -p tcp --dport $HTTP_PORT -j ACCEPT && ")
         sb.append("iptables -w -I INPUT 1 -j FSCC_IN")
 
+        sb.append(" && iptables -w -N FSCC_FWD")
         if (strictOffline) {
-            sb.append(" && iptables -w -N FSCC_FWD")
             sb.append(" && iptables -w -A FSCC_FWD -i $iface -j DROP")
             sb.append(" && iptables -w -A FSCC_FWD -o $iface -j DROP")
-            sb.append(" && iptables -w -I FORWARD 1 -j FSCC_FWD")
-            sb.append(" && (ip6tables -w -N FSCC_FWD6 2>/dev/null || true)")
-            sb.append(" && (ip6tables -w -A FSCC_FWD6 -i $iface -j DROP 2>/dev/null || true)")
-            sb.append(" && (ip6tables -w -A FSCC_FWD6 -o $iface -j DROP 2>/dev/null || true)")
-            sb.append(" && (ip6tables -w -I FORWARD 1 -j FSCC_FWD6 2>/dev/null || true)")
-            sb.append(" && (ip6tables -w -N FSCC_IN6 2>/dev/null || true)")
-            sb.append(" && (ip6tables -w -A FSCC_IN6 -i $iface -p udp --dport 53 -j REJECT 2>/dev/null || true)")
-            sb.append(" && (ip6tables -w -A FSCC_IN6 -i $iface -p tcp --dport 53 -j REJECT 2>/dev/null || true)")
-            sb.append(" && (ip6tables -w -I INPUT 1 -j FSCC_IN6 2>/dev/null || true)")
+        } else {
+            sb.append(" && iptables -w -A FSCC_FWD -i $iface -j ACCEPT")
+            sb.append(" && iptables -w -A FSCC_FWD -o $iface -j ACCEPT")
         }
+        sb.append(" && iptables -w -I FORWARD 1 -j FSCC_FWD")
+
+        sb.append(" && (ip6tables -w -N FSCC_FWD6 2>/dev/null || true)")
+        sb.append(" && (ip6tables -w -A FSCC_FWD6 -i $iface -j DROP 2>/dev/null || true)")
+        sb.append(" && (ip6tables -w -A FSCC_FWD6 -o $iface -j DROP 2>/dev/null || true)")
+        sb.append(" && (ip6tables -w -I FORWARD 1 -j FSCC_FWD6 2>/dev/null || true)")
+        sb.append(" && (ip6tables -w -N FSCC_IN6 2>/dev/null || true)")
+        sb.append(" && (ip6tables -w -A FSCC_IN6 -i $iface -p udp --dport 53 -j REJECT 2>/dev/null || true)")
+        sb.append(" && (ip6tables -w -A FSCC_IN6 -i $iface -p tcp --dport 53 -j REJECT 2>/dev/null || true)")
+        sb.append(" && (ip6tables -w -I INPUT 1 -j FSCC_IN6 2>/dev/null || true)")
         return runSu(sb.toString())
     }
 

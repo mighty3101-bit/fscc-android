@@ -38,17 +38,20 @@ class FsccTileService : TileService() {
 
     private fun refreshTile() {
         val tile = qsTile ?: return
+        val prefs = getSharedPreferences("fscc_prefs", Context.MODE_PRIVATE)
+        val strict = prefs.getBoolean("strict_offline", true)
         if (FsccBus.isRunning) {
             tile.state = Tile.STATE_ACTIVE
             tile.label = "FSCC Switch"
             if (Build.VERSION.SDK_INT >= 29) {
-                tile.subtitle = "${FsccBus.activeIface} (${FsccBus.activeIp})"
+                val tag = if (FsccBus.modeLabel == "90DNS") "90DNS" else "FSCC"
+                tile.subtitle = "$tag ${FsccBus.activeIface}"
             }
         } else {
             tile.state = Tile.STATE_INACTIVE
             tile.label = "FSCC Switch"
             if (Build.VERSION.SDK_INT >= 29) {
-                tile.subtitle = "Hors-ligne Switch"
+                tile.subtitle = if (strict) "Mode FSCC Strict" else "Mode 90DNS"
             }
         }
         tile.updateTile()

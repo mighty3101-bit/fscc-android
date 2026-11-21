@@ -8,6 +8,7 @@ object FsccBus {
     @Volatile var isRunning: Boolean = false
     @Volatile var activeIface: String = ""
     @Volatile var activeIp: String = ""
+    @Volatile var modeLabel: String = "FSCC STRICT"
     @Volatile var allowedCount: Int = 0
     @Volatile var blockedCount: Int = 0
     @Volatile var httpCount: Int = 0

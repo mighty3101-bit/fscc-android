@@ -64,6 +64,7 @@ class MainActivity : AppCompatActivity() {
         }
         switchOffline.setOnCheckedChangeListener { _, checked ->
             prefs.edit().putBoolean("strict_offline", checked).apply()
+            updateUi()
         }
 
         if (Build.VERSION.SDK_INT >= 33 &&
@@ -148,16 +149,17 @@ class MainActivity : AppCompatActivity() {
             }
         }
         if (FsccBus.isRunning) {
-            txtStatus.text = "Statut : ACTIF sur ${FsccBus.activeIface} (${FsccBus.activeIp})"
+            txtStatus.text = "ACTIF [${FsccBus.modeLabel}] sur ${FsccBus.activeIface} (${FsccBus.activeIp})"
             txtStatus.setTextColor(Color.parseColor("#4ADE80"))
-            btnToggle.text = "Arrêter FSCC"
+            btnToggle.text = "Arrêter"
             spinnerIfaces.isEnabled = false
             switchAutoHotspot.isEnabled = false
             switchOffline.isEnabled = false
         } else {
-            txtStatus.text = "Statut : ARRÊTÉ"
+            val mode = if (switchOffline.isChecked) "FSCC STRICT" else "90DNS INTERNET"
+            txtStatus.text = "ARRÊTÉ (Mode prêt : $mode)"
             txtStatus.setTextColor(Color.parseColor("#FF6B6B"))
-            btnToggle.text = "Démarrer FSCC"
+            btnToggle.text = if (switchOffline.isChecked) "Démarrer FSCC Strict" else "Démarrer 90DNS (KaiTube)"
             spinnerIfaces.isEnabled = true
             switchAutoHotspot.isEnabled = true
             switchOffline.isEnabled = true
@@ -169,7 +171,7 @@ class MainActivity : AppCompatActivity() {
             txtLogs.text = text
             scrollLogs.post { scrollLogs.fullScroll(View.FOCUS_DOWN) }
         } else {
-            txtLogs.text = "Prêt. Appuie sur Démarrer FSCC ou utilise la tuile Réglages Rapides.\n"
+            txtLogs.text = "Prêt. Choisis FSCC Strict ou 90DNS puis appuie sur Démarrer.\n"
         }
     }
 }

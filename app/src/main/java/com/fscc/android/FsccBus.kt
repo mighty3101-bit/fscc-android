@@ -33,8 +33,7 @@ object FsccBus {
     }
 
     @Synchronized
-    fun snapshot(): String = logs.joinToString("
-")
+    fun snapshot(): String = logs.joinToString("\n")
 
     @Synchronized
     fun notifyState() {

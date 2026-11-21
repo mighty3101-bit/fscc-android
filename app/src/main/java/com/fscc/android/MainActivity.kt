@@ -139,8 +139,7 @@ class MainActivity : AppCompatActivity() {
             txtLogs.text = text
             scrollLogs.post { scrollLogs.fullScroll(View.FOCUS_DOWN) }
         } else {
-            txtLogs.text = "Prêt. Allume le hotspot, sélectionne wlan2 puis appuie sur Démarrer.
-"
+            txtLogs.text = "Prêt. Allume le hotspot, sélectionne wlan2 puis appuie sur Démarrer.\n"
         }
     }
 }

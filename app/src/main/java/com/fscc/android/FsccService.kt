@@ -15,6 +15,8 @@ import java.io.DataOutputStream
 import java.io.InputStreamReader
 import java.net.DatagramPacket
 import java.net.DatagramSocket
+import java.net.Inet4Address
+import java.net.NetworkInterface
 import java.net.ServerSocket
 import java.net.Socket
 import java.util.concurrent.Executors
@@ -28,6 +30,7 @@ class FsccService : Service() {
         const val EXTRA_IFACE = "iface"
         const val EXTRA_IP = "ip"
         const val EXTRA_STRICT_OFFLINE = "strict_offline"
+        const val EXTRA_AUTO_HOTSPOT = "auto_hotspot"
         private const val DNS_PORT = 5354
         private const val HTTP_PORT = 8095
         private const val CHANNEL_ID = "fscc_channel"
@@ -40,6 +43,8 @@ class FsccService : Service() {
     private var httpServer: ServerSocket? = null
     private var currentIface: String = ""
     private var currentIp: String = ""
+    @Volatile private var manageHotspot: Boolean = false
+    @Volatile private var hotspotStartedByUs: Boolean = false
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -53,9 +58,11 @@ class FsccService : Service() {
                 val iface = intent.getStringExtra(EXTRA_IFACE).orEmpty()
                 val ip = intent.getStringExtra(EXTRA_IP).orEmpty()
                 val strict = intent.getBooleanExtra(EXTRA_STRICT_OFFLINE, true)
-                startForegroundNotif("FSCC actif sur $iface ($ip)")
+                val autoHotspot = intent.getBooleanExtra(EXTRA_AUTO_HOTSPOT, false)
+                val label = if (iface.isNotEmpty()) "$iface ($ip)" else "auto hotspot"
+                startForegroundNotif("FSCC actif sur $label")
                 if (!running.get()) {
-                    startAll(iface, ip, strict)
+                    startAll(iface, ip, strict, autoHotspot)
                 }
             }
         }
@@ -99,22 +106,89 @@ class FsccService : Service() {
         }
     }
 
-    private fun startAll(iface: String, ip: String, strictOffline: Boolean) {
-        if (!iface.matches(Regex("^[a-zA-Z0-9._-]+$")) ||
-            !ip.matches(Regex("^(\\d{1,3}\\.){3}\\d{1,3}$"))
-        ) {
-            FsccBus.log("ERREUR : Interface ou IP invalide ($iface / $ip)")
-            stopSelf()
-            return
+    private fun findHotspotIface(): Pair<String, String>? {
+        val priority = listOf("wlan2", "swlan0", "ap0", "softap0", "wlan1")
+        val all = try {
+            NetworkInterface.getNetworkInterfaces()?.toList().orEmpty()
+        } catch (_: Exception) {
+            emptyList()
         }
+        for (name in priority) {
+            val ni = all.firstOrNull { it.name == name && it.isUp && !it.isLoopback } ?: continue
+            for (addr in ni.inetAddresses) {
+                if (addr is Inet4Address && !addr.isLoopbackAddress) {
+                    val ip = addr.hostAddress ?: continue
+                    return name to ip
+                }
+            }
+        }
+        return null
+    }
 
-        val ipBytes = ip.split(".").map { it.toInt().toByte() }.toByteArray()
-        currentIface = iface
-        currentIp = ip
+    private fun runHotspotCtl(action: String): Boolean {
+        val apkPath = applicationInfo.sourceDir
+        val cmd = "CLASSPATH=" + "\"" + apkPath + "\"" + " app_process /system/bin com.fscc.android.HotspotCtl " + action
+        return runSu(cmd)
+    }
+
+    private fun startAll(ifaceParam: String, ipParam: String, strictOffline: Boolean, autoHotspot: Boolean) {
         running.set(true)
+        manageHotspot = autoHotspot
+        hotspotStartedByUs = false
 
         pool.execute {
             try {
+                var iface = ifaceParam
+                var ip = ipParam
+
+                if (autoHotspot) {
+                    val existing = findHotspotIface()
+                    if (existing != null) {
+                        iface = existing.first
+                        ip = existing.second
+                        hotspotStartedByUs = true
+                    } else {
+                        FsccBus.log("Allumage automatique du hotspot...")
+                        if (!runHotspotCtl("start")) {
+                            FsccBus.log("ERREUR : Échec allumage hotspot via root")
+                            stopAll()
+                            stopSelf()
+                            return@execute
+                        }
+                        hotspotStartedByUs = true
+                        var found: Pair<String, String>? = null
+                        for (idx in 0 until 40) {
+                            if (!running.get()) break
+                            found = findHotspotIface()
+                            if (found != null) break
+                            Thread.sleep(250)
+                        }
+                        if (!running.get()) return@execute
+                        if (found == null) {
+                            FsccBus.log("ERREUR : Hotspot actif mais aucune interface IPv4 détectée")
+                            stopAll()
+                            stopSelf()
+                            return@execute
+                        }
+                        iface = found.first
+                        ip = found.second
+                    }
+                    startForegroundNotif("FSCC actif sur $iface ($ip)")
+                }
+
+                if (!iface.matches(Regex("^[a-zA-Z0-9._-]+$")) ||
+                    !ip.matches(Regex("^(\\d{1,3}\\.){3}\\d{1,3}$"))
+                ) {
+                    FsccBus.log("ERREUR : Interface ou IP invalide ($iface / $ip)")
+                    stopAll()
+                    stopSelf()
+                    return@execute
+                }
+
+                val ipBytes = ip.split(".").map { it.toInt().toByte() }.toByteArray()
+                currentIface = iface
+                currentIp = ip
+
                 udpDnsSocket = DatagramSocket(DNS_PORT).apply { reuseAddress = true }
                 httpServer = ServerSocket(HTTP_PORT).apply { reuseAddress = true }
                 tcpDnsServer = ServerSocket(DNS_PORT).apply { reuseAddress = true }
@@ -153,12 +227,25 @@ class FsccService : Service() {
         tcpDnsServer = null
         httpServer = null
 
-        if (currentIface.isNotEmpty()) {
+        val hadIface = currentIface.isNotEmpty()
+        currentIface = ""
+        currentIp = ""
+        if (hadIface) {
             removeIptables()
             FsccBus.log("FSCC arrêté (règles iptables nettoyées)")
         }
-        currentIface = ""
-        currentIp = ""
+
+        val shouldStopHs = manageHotspot && hotspotStartedByUs
+        manageHotspot = false
+        hotspotStartedByUs = false
+        if (shouldStopHs) {
+            if (runHotspotCtl("stop")) {
+                FsccBus.log("Hotspot coupé automatiquement")
+            } else {
+                FsccBus.log("Attention : échec coupure automatique du hotspot")
+            }
+        }
+
         FsccBus.isRunning = false
         FsccBus.activeIface = ""
         FsccBus.activeIp = ""

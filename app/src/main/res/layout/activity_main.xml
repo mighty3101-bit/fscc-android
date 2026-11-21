@@ -47,6 +47,15 @@
     </LinearLayout>
 
     <androidx.appcompat.widget.SwitchCompat
+        android:id="@+id/switchAutoHotspot"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:checked="true"
+        android:text="Allumer / couper le hotspot automatiquement"
+        android:textColor="#EAEAEA"
+        android:layout_marginBottom="8dp" />
+
+    <androidx.appcompat.widget.SwitchCompat
         android:id="@+id/switchOffline"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -91,7 +100,6 @@
             android:fontFamily="monospace"
             android:textColor="#D0E0D0"
             android:textSize="12sp"
-            android:text="Prêt. Allume le hotspot, choisis wlan2 puis appuie sur Démarrer.
-" />
+            android:text="Prêt. Appuie sur Démarrer FSCC." />
     </ScrollView>
 </LinearLayout>

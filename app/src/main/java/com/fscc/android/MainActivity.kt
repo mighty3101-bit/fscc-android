@@ -27,6 +27,7 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var txtStatus: TextView
     private lateinit var spinnerIfaces: Spinner
+    private lateinit var switchAutoHotspot: SwitchCompat
     private lateinit var switchOffline: SwitchCompat
     private lateinit var btnToggle: Button
     private lateinit var btnRefresh: Button
@@ -35,6 +36,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var txtLogs: TextView
 
     private val ifaceList = mutableListOf<NetIface>()
+    private var lastRunning: Boolean? = null
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -42,6 +44,7 @@ class MainActivity : AppCompatActivity() {
 
         txtStatus = findViewById(R.id.txtStatus)
         spinnerIfaces = findViewById(R.id.spinnerIfaces)
+        switchAutoHotspot = findViewById(R.id.switchAutoHotspot)
         switchOffline = findViewById(R.id.switchOffline)
         btnToggle = findViewById(R.id.btnToggle)
         btnRefresh = findViewById(R.id.btnRefresh)
@@ -63,16 +66,18 @@ class MainActivity : AppCompatActivity() {
                 val i = Intent(this, FsccService::class.java).apply { action = FsccService.ACTION_STOP }
                 startService(i)
             } else {
+                val autoHotspot = switchAutoHotspot.isChecked
                 val selected = spinnerIfaces.selectedItem as? NetIface
-                if (selected == null) {
+                if (!autoHotspot && selected == null) {
                     FsccBus.log("ERREUR : Aucune interface IPv4 détectée (allume le hotspot !)")
                     return@setOnClickListener
                 }
                 val i = Intent(this, FsccService::class.java).apply {
                     action = FsccService.ACTION_START
-                    putExtra(FsccService.EXTRA_IFACE, selected.name)
-                    putExtra(FsccService.EXTRA_IP, selected.ip)
+                    putExtra(FsccService.EXTRA_IFACE, selected?.name ?: "")
+                    putExtra(FsccService.EXTRA_IP, selected?.ip ?: "")
                     putExtra(FsccService.EXTRA_STRICT_OFFLINE, switchOffline.isChecked)
+                    putExtra(FsccService.EXTRA_AUTO_HOTSPOT, autoHotspot)
                 }
                 ContextCompat.startForegroundService(this, i)
             }
@@ -121,17 +126,26 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun updateUi() {
+        if (lastRunning != FsccBus.isRunning) {
+            lastRunning = FsccBus.isRunning
+            refreshInterfaces()
+            if (!FsccBus.isRunning) {
+                txtLogs.postDelayed({ refreshInterfaces() }, 1500)
+            }
+        }
         if (FsccBus.isRunning) {
             txtStatus.text = "Statut : ACTIF sur ${FsccBus.activeIface} (${FsccBus.activeIp})"
             txtStatus.setTextColor(Color.parseColor("#4ADE80"))
             btnToggle.text = "Arrêter FSCC"
             spinnerIfaces.isEnabled = false
+            switchAutoHotspot.isEnabled = false
             switchOffline.isEnabled = false
         } else {
             txtStatus.text = "Statut : ARRÊTÉ"
             txtStatus.setTextColor(Color.parseColor("#FF6B6B"))
             btnToggle.text = "Démarrer FSCC"
             spinnerIfaces.isEnabled = true
+            switchAutoHotspot.isEnabled = true
             switchOffline.isEnabled = true
         }
         val text = FsccBus.snapshot()
@@ -139,7 +153,7 @@ class MainActivity : AppCompatActivity() {
             txtLogs.text = text
             scrollLogs.post { scrollLogs.fullScroll(View.FOCUS_DOWN) }
         } else {
-            txtLogs.text = "Prêt. Allume le hotspot, sélectionne wlan2 puis appuie sur Démarrer.\n"
+            txtLogs.text = "Prêt. Appuie sur Démarrer FSCC (le hotspot démarrera tout seul).\n"
         }
     }
 }

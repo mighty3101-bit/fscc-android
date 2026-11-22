@@ -238,7 +238,7 @@ class FsccService : Service() {
 
     private fun runHotspotCtl(action: String): Boolean {
         val apkPath = applicationInfo.sourceDir
-        val cmd = "CLASSPATH=" + """ + apkPath + """ + " app_process /system/bin com.fscc.android.HotspotCtl " + action
+        val cmd = "CLASSPATH=" + "\"" + apkPath + "\"" + " app_process /system/bin com.fscc.android.HotspotCtl " + action
         return runSu(cmd)
     }
 
